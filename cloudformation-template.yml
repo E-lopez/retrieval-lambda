@@ -1,0 +1,195 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: PreProcessing Lambda with spacy and tesseract OCR
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  S3Bucket:
+    Type: String
+    Description: S3 bucket containing the Lambda deployment package
+    Default: preprocess-lambda-deployment-bucket
+  
+  S3Key:
+    Type: String
+    Default: preprocess-lambda/function.zip
+    Description: S3 key for the Lambda deployment package
+  
+Resources:
+  # Lambda Layers
+  OCRLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub preprocess-ocr-layer-${Environment}
+      Description: OCR and image processing layer
+      Content:
+        S3Bucket: !Ref S3Bucket
+        S3Key: layers/ocr-layer.zip
+      CompatibleRuntimes:
+        - python3.11
+        - python3.12
+      CompatibleArchitectures:
+        - arm64
+
+  SpacyLayer:
+    Type: AWS::Lambda::LayerVersion
+    Properties:
+      LayerName: !Sub preprocess-spacy-layer-${Environment}
+      Description: SpaCy NLP layer with Spanish model
+      Content:
+        S3Bucket: !Ref S3Bucket
+        S3Key: layers/spacy-layer.zip
+      CompatibleRuntimes:
+        - python3.11
+        - python3.12
+      CompatibleArchitectures:
+        - arm64
+
+  # Lambda Execution Role
+  PreprocessLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                  - s3:ListBucket
+                Resource:
+                  - arn:aws:s3:::preprocess-files-bucket
+                  - arn:aws:s3:::preprocess-files-bucket/*
+        - PolicyName: LambdaSelfInvokePolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:preprocess-lambda-${Environment}"
+
+  # API Gateway V2 (HTTP API)
+  PreprocessApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub "preprocess-api-${Environment}"
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - "*"
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - Origin
+          - X-Requested-With
+
+  # API Gateway Integration
+  LambdaIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref PreprocessApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PreprocessLambdaFunction.Arn}/invocations"
+      PayloadFormatVersion: "2.0"
+
+  # API Gateway Routes
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref PreprocessApi
+      RouteKey: "ANY /{proxy+}"
+      Target: !Sub "integrations/${LambdaIntegration}"
+
+  # API Gateway Stage
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref PreprocessApi
+      StageName: "$default"
+      AutoDeploy: true
+
+  # Lambda Permission
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PreprocessLambdaFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PreprocessApi}/*/*"
+
+  # Lambda Function
+  PreprocessLambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub preprocess-lambda-${Environment}
+      Runtime: python3.11
+      Architectures:
+        - arm64
+      CodeUri: 
+        Bucket: !Ref S3Bucket
+        Key: !Ref S3Key
+      Handler: lambda_function.lambda_handler
+      MemorySize: 3008
+      Timeout: 900
+      Role: !GetAtt PreprocessLambdaRole.Arn
+      Layers:
+        - !Ref OCRLayer
+        - !Ref SpacyLayer
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+
+
+Outputs:
+  ApiUrl:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${PreprocessApi}.execute-api.${AWS::Region}.amazonaws.com/"
+    Export:
+      Name: !Sub "${AWS::StackName}-ApiUrl"
+
+  OCRLayerArn:
+    Description: "ARN of the OCR Layer"
+    Value: !Ref OCRLayer
+    Export:
+      Name: !Sub "${AWS::StackName}-OCRLayerArn"
+
+  SpacyLayerArn:
+    Description: "ARN of the SpaCy Layer"
+    Value: !Ref SpacyLayer
+    Export:
+      Name: !Sub "${AWS::StackName}-SpacyLayerArn"
+
+  PreprocessLambdaFunctionArn:
+    Description: "ARN of the Preprocess Lambda Function"
+    Value: !GetAtt PreprocessLambdaFunction.Arn
+    Export:
+      Name: !Sub "${AWS::StackName}-PreprocessLambdaFunctionArn"
+
+  PreprocessLambdaFunctionName:
+    Description: "Name of the Preprocess Lambda Function"
+    Value: !Ref PreprocessLambdaFunction
+    Export:
+      Name: !Sub "${AWS::StackName}-PreprocessLambdaFunctionName"
