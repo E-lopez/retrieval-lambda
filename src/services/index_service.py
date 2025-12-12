@@ -2,7 +2,7 @@ from venv import logger
 from collections import defaultdict
 import globals_cache as gc
 from services.search_service import search
-from src.models.corpus_domain_keyword import CORPUS_DOMAIN_KEYWORDS
+from models.corpus_domain_keyword import CORPUS_DOMAIN_KEYWORDS
 from utils.s3_utils import upload_index
 from utils.logger import log, get_correlation_id
 from utils.LLM_utils import embed
@@ -10,7 +10,6 @@ from utils.file_utils import get_parsed_file
 
 
 def create_index():
-    # Placeholder function to create an index
     text = get_parsed_file()
     print(f"Creating index with {len(text)} {type(text)} chapters")
     content = [
@@ -33,6 +32,7 @@ def create_index():
 
     upload_index('civil', vectors, indexed_data)
     return {'message': 'Index created successfully'}
+
 
 def parse_query_obj(query_obj, mapping_table=CORPUS_DOMAIN_KEYWORDS):
     parsed_queries = defaultdict(lambda: {'facts': set(), 'queries': set()})

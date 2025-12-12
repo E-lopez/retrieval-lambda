@@ -1,6 +1,6 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: PreProcessing Lambda with spacy and tesseract OCR
+Description: Retrieval Lambda with sentence-transformers
 
 Parameters:
   Environment:
@@ -12,45 +12,27 @@ Parameters:
   S3Bucket:
     Type: String
     Description: S3 bucket containing the Lambda deployment package
-    Default: preprocess-lambda-deployment-bucket
+    Default: retrieval-lambda-deployment-bucket
   
   S3Key:
     Type: String
-    Default: preprocess-lambda/function.zip
+    Default: retrieval-lambda/function.zip
     Description: S3 key for the Lambda deployment package
   
+  HFToken:
+    Type: String
+    NoEcho: true
+    Description: Hugging Face API token for embeddings
+    Default: ""
+  
+  EmbeddingsBucket:
+    Type: String
+    Description: S3 bucket for storing embeddings
+    Default: legal-system-embeddings-v1
+  
 Resources:
-  # Lambda Layers
-  OCRLayer:
-    Type: AWS::Lambda::LayerVersion
-    Properties:
-      LayerName: !Sub preprocess-ocr-layer-${Environment}
-      Description: OCR and image processing layer
-      Content:
-        S3Bucket: !Ref S3Bucket
-        S3Key: layers/ocr-layer.zip
-      CompatibleRuntimes:
-        - python3.11
-        - python3.12
-      CompatibleArchitectures:
-        - arm64
-
-  SpacyLayer:
-    Type: AWS::Lambda::LayerVersion
-    Properties:
-      LayerName: !Sub preprocess-spacy-layer-${Environment}
-      Description: SpaCy NLP layer with Spanish model
-      Content:
-        S3Bucket: !Ref S3Bucket
-        S3Key: layers/spacy-layer.zip
-      CompatibleRuntimes:
-        - python3.11
-        - python3.12
-      CompatibleArchitectures:
-        - arm64
-
   # Lambda Execution Role
-  PreprocessLambdaRole:
+  RetrievalLambdaRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -74,22 +56,15 @@ Resources:
                   - s3:DeleteObject
                   - s3:ListBucket
                 Resource:
-                  - arn:aws:s3:::preprocess-files-bucket
-                  - arn:aws:s3:::preprocess-files-bucket/*
-        - PolicyName: LambdaSelfInvokePolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - lambda:InvokeFunction
-                Resource: !Sub "arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:preprocess-lambda-${Environment}"
+                  - !Sub "arn:aws:s3:::${EmbeddingsBucket}"
+                  - !Sub "arn:aws:s3:::${EmbeddingsBucket}/*"
+
 
   # API Gateway V2 (HTTP API)
-  PreprocessApi:
+  RetrievalApi:
     Type: AWS::ApiGatewayV2::Api
     Properties:
-      Name: !Sub "preprocess-api-${Environment}"
+      Name: !Sub "retrieval-api-${Environment}"
       ProtocolType: HTTP
       CorsConfiguration:
         AllowOrigins:
@@ -110,16 +85,16 @@ Resources:
   LambdaIntegration:
     Type: AWS::ApiGatewayV2::Integration
     Properties:
-      ApiId: !Ref PreprocessApi
+      ApiId: !Ref RetrievalApi
       IntegrationType: AWS_PROXY
-      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${PreprocessLambdaFunction.Arn}/invocations"
+      IntegrationUri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${RetrievalLambdaFunction.Arn}/invocations"
       PayloadFormatVersion: "2.0"
 
   # API Gateway Routes
   ApiRoute:
     Type: AWS::ApiGatewayV2::Route
     Properties:
-      ApiId: !Ref PreprocessApi
+      ApiId: !Ref RetrievalApi
       RouteKey: "ANY /{proxy+}"
       Target: !Sub "integrations/${LambdaIntegration}"
 
@@ -127,7 +102,7 @@ Resources:
   ApiStage:
     Type: AWS::ApiGatewayV2::Stage
     Properties:
-      ApiId: !Ref PreprocessApi
+      ApiId: !Ref RetrievalApi
       StageName: "$default"
       AutoDeploy: true
 
@@ -135,16 +110,16 @@ Resources:
   LambdaInvokePermission:
     Type: AWS::Lambda::Permission
     Properties:
-      FunctionName: !Ref PreprocessLambdaFunction
+      FunctionName: !Ref RetrievalLambdaFunction
       Action: lambda:InvokeFunction
       Principal: apigateway.amazonaws.com
-      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${PreprocessApi}/*/*"
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RetrievalApi}/*/*"
 
   # Lambda Function
-  PreprocessLambdaFunction:
+  RetrievalLambdaFunction:
     Type: AWS::Serverless::Function
     Properties:
-      FunctionName: !Sub preprocess-lambda-${Environment}
+      FunctionName: !Sub retrieval-lambda-${Environment}
       Runtime: python3.11
       Architectures:
         - arm64
@@ -152,44 +127,31 @@ Resources:
         Bucket: !Ref S3Bucket
         Key: !Ref S3Key
       Handler: lambda_function.lambda_handler
-      MemorySize: 3008
-      Timeout: 900
-      Role: !GetAtt PreprocessLambdaRole.Arn
-      Layers:
-        - !Ref OCRLayer
-        - !Ref SpacyLayer
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt RetrievalLambdaRole.Arn
+      # No layers needed - numpy included in package
       Environment:
         Variables:
           ENVIRONMENT: !Ref Environment
+          HF_TOKEN: !Ref HFToken
 
 
 Outputs:
   ApiUrl:
     Description: "API Gateway endpoint URL"
-    Value: !Sub "https://${PreprocessApi}.execute-api.${AWS::Region}.amazonaws.com/"
+    Value: !Sub "https://${RetrievalApi}.execute-api.${AWS::Region}.amazonaws.com/"
     Export:
       Name: !Sub "${AWS::StackName}-ApiUrl"
 
-  OCRLayerArn:
-    Description: "ARN of the OCR Layer"
-    Value: !Ref OCRLayer
+  RetrievalLambdaFunctionArn:
+    Description: "ARN of the Retrieval Lambda Function"
+    Value: !GetAtt RetrievalLambdaFunction.Arn
     Export:
-      Name: !Sub "${AWS::StackName}-OCRLayerArn"
+      Name: !Sub "${AWS::StackName}-RetrievalLambdaFunctionArn"
 
-  SpacyLayerArn:
-    Description: "ARN of the SpaCy Layer"
-    Value: !Ref SpacyLayer
+  RetrievalLambdaFunctionName:
+    Description: "Name of the Retrieval Lambda Function"
+    Value: !Ref RetrievalLambdaFunction
     Export:
-      Name: !Sub "${AWS::StackName}-SpacyLayerArn"
-
-  PreprocessLambdaFunctionArn:
-    Description: "ARN of the Preprocess Lambda Function"
-    Value: !GetAtt PreprocessLambdaFunction.Arn
-    Export:
-      Name: !Sub "${AWS::StackName}-PreprocessLambdaFunctionArn"
-
-  PreprocessLambdaFunctionName:
-    Description: "Name of the Preprocess Lambda Function"
-    Value: !Ref PreprocessLambdaFunction
-    Export:
-      Name: !Sub "${AWS::StackName}-PreprocessLambdaFunctionName"
+      Name: !Sub "${AWS::StackName}-RetrievalLambdaFunctionName"

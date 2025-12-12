@@ -28,7 +28,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
 def handle_route(http_method, path, body, path_parameters, origin):
     if path in ['/health', '/']:
-        return create_response(200, {'status': 'healthy', 'service': 'preprocess-lambda'}, origin)
+        return create_response(200, {'status': 'healthy', 'service': 'retrieval-lambda'}, origin)
         
     if path == '/create-index' and http_method == 'GET':
         from services.index_service import create_index
